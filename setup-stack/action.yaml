@@ -1,0 +1,39 @@
+name: "Setup Stack"
+description: "Set up language runtime and dependencies based on project manifest"
+
+inputs:
+  language:
+    description: "Programming language (go, typescript, javascript, python)"
+    required: true
+  runtime:
+    description: "Runtime version (e.g., go-1.24, node-22, python-3.12)"
+    required: false
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Go
+      if: inputs.language == 'go'
+      uses: actions/setup-go@v5
+      with:
+        go-version: "1.24"
+
+    - name: Setup Node
+      if: contains(fromJSON('["typescript","javascript"]'), inputs.language)
+      uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+
+    - name: Setup Python
+      if: inputs.language == 'python'
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        if [ -f "go.mod" ]; then go mod download; fi
+        if [ -f "package-lock.json" ]; then npm ci; fi
+        if [ -f "package.json" ] && [ ! -f "package-lock.json" ]; then npm install; fi
+        if [ -f "pyproject.toml" ]; then pip install -e ".[dev]" 2>/dev/null || pip install -e . 2>/dev/null || true; fi

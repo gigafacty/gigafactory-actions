@@ -1,0 +1,37 @@
+name: "Type Check"
+description: "Run stack-aware type checking"
+
+inputs:
+  language:
+    description: "Programming language"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Type check Go
+      if: inputs.language == 'go'
+      shell: bash
+      run: go vet ./...
+
+    - name: Type check TypeScript
+      if: contains(fromJSON('["typescript","javascript"]'), inputs.language)
+      shell: bash
+      run: |
+        if [ -f "tsconfig.json" ]; then
+          npx tsc --noEmit
+        else
+          echo "::warning::No tsconfig.json found — skipping type check"
+        fi
+
+    - name: Type check Python
+      if: inputs.language == 'python'
+      shell: bash
+      run: |
+        if command -v mypy &>/dev/null; then
+          mypy . --ignore-missing-imports
+        elif command -v pyright &>/dev/null; then
+          pyright .
+        else
+          echo "::warning::No Python type checker configured — skipping"
+        fi

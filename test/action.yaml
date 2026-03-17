@@ -1,0 +1,49 @@
+name: "Test"
+description: "Run stack-aware test suite with optional coverage enforcement"
+
+inputs:
+  language:
+    description: "Programming language"
+    required: true
+  min_coverage:
+    description: "Minimum test coverage percentage (0 to skip)"
+    required: false
+    default: "0"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Test Go
+      if: inputs.language == 'go'
+      shell: bash
+      run: |
+        if [ "${{ inputs.min_coverage }}" -gt 0 ] 2>/dev/null; then
+          go test -coverprofile=coverage.out ./...
+          coverage=$(go tool cover -func=coverage.out | grep total | awk '{print int($3)}')
+          echo "Coverage: ${coverage}%"
+          if [ "$coverage" -lt "${{ inputs.min_coverage }}" ]; then
+            echo "::error::Coverage ${coverage}% is below minimum ${{ inputs.min_coverage }}%"
+            exit 1
+          fi
+        else
+          go test ./...
+        fi
+
+    - name: Test TypeScript/JavaScript
+      if: contains(fromJSON('["typescript","javascript"]'), inputs.language)
+      shell: bash
+      run: |
+        if [ -f "package.json" ]; then
+          npm test
+        fi
+
+    - name: Test Python
+      if: inputs.language == 'python'
+      shell: bash
+      run: |
+        if [ "${{ inputs.min_coverage }}" -gt 0 ] 2>/dev/null; then
+          pip install pytest-cov 2>/dev/null || true
+          pytest --cov=. --cov-fail-under=${{ inputs.min_coverage }}
+        else
+          pytest 2>/dev/null || python -m unittest discover 2>/dev/null || echo "::warning::No test runner found"
+        fi

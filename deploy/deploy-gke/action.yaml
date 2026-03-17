@@ -1,0 +1,19 @@
+name: "Deploy GKE"
+description: "Deploy to GKE Autopilot namespace"
+
+inputs:
+  project_config:
+    description: "Path to .gigafactory/project.yaml"
+    required: true
+  environment:
+    description: "Target environment"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Deploy (placeholder)
+      shell: bash
+      run: |
+        echo "GKE Autopilot deployment would execute here."
+        echo "Implementation deferred to Phase 6."

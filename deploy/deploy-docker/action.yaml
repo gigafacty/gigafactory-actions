@@ -1,0 +1,19 @@
+name: "Deploy Docker"
+description: "Deploy via generic Docker host"
+
+inputs:
+  project_config:
+    description: "Path to .gigafactory/project.yaml"
+    required: true
+  environment:
+    description: "Target environment"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Deploy (placeholder)
+      shell: bash
+      run: |
+        echo "Docker Compose deployment would execute here."
+        echo "Implementation deferred to Phase 6."

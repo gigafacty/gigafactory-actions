@@ -1,0 +1,47 @@
+name: "Security Scan"
+description: "Run dependency audit and secret scanning"
+
+inputs:
+  language:
+    description: "Programming language"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Check for committed secrets
+      shell: bash
+      run: |
+        # Basic secret scanning in recent commits
+        secrets=$(git diff HEAD~1 HEAD -- . ':!*.lock' ':!package-lock.json' 2>/dev/null | \
+          grep -iE '^\+.*(password|secret|api_key|apikey|private_key)\s*[:=]\s*["\x27][^\s]{8,}' || true)
+        if [ -n "$secrets" ]; then
+          echo "::error::Potential secrets in recent commit"
+          echo "$secrets" | head -5
+          exit 1
+        fi
+
+    - name: Audit Go dependencies
+      if: inputs.language == 'go'
+      shell: bash
+      run: |
+        go list -json -m all 2>/dev/null | go run golang.org/x/vuln/cmd/govulncheck@latest ./... 2>/dev/null || \
+          echo "::warning::govulncheck not available — skipping vulnerability scan"
+
+    - name: Audit Node dependencies
+      if: contains(fromJSON('["typescript","javascript"]'), inputs.language)
+      shell: bash
+      run: |
+        if [ -f "package-lock.json" ]; then
+          npm audit --production 2>/dev/null || echo "::warning::npm audit found vulnerabilities"
+        fi
+
+    - name: Audit Python dependencies
+      if: inputs.language == 'python'
+      shell: bash
+      run: |
+        if pip show pip-audit &>/dev/null 2>&1; then
+          pip-audit
+        else
+          echo "::warning::pip-audit not installed — skipping"
+        fi

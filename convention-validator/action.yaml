@@ -1,0 +1,51 @@
+name: "Gigafactory Convention Validator"
+description: "Validate project conventions based on .gigafactory/project.yaml manifest"
+
+inputs:
+  project_config:
+    description: "Path to .gigafactory/project.yaml"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Validate manifest exists
+      shell: bash
+      run: |
+        if [ ! -f "${{ inputs.project_config }}" ]; then
+          echo "::error::Project config not found at ${{ inputs.project_config }}"
+          exit 1
+        fi
+
+    - name: Parse manifest
+      id: config
+      shell: bash
+      run: |
+        CONFIG="${{ inputs.project_config }}"
+        echo "language=$(grep 'language:' "$CONFIG" | head -1 | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+        echo "statemesh=$(grep 'statemesh:' "$CONFIG" | head -1 | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+        echo "require_tests=$(grep 'require_tests:' "$CONFIG" | head -1 | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+    - name: Run universal rules
+      shell: bash
+      run: bash ${{ github.action_path }}/rules/universal.sh "${{ inputs.project_config }}"
+
+    - name: Run TypeScript rules
+      if: contains(fromJSON('["typescript","javascript"]'), steps.config.outputs.language)
+      shell: bash
+      run: bash ${{ github.action_path }}/rules/typescript.sh
+
+    - name: Run Python rules
+      if: steps.config.outputs.language == 'python'
+      shell: bash
+      run: bash ${{ github.action_path }}/rules/python.sh
+
+    - name: Run Go rules
+      if: steps.config.outputs.language == 'go'
+      shell: bash
+      run: bash ${{ github.action_path }}/rules/go.sh
+
+    - name: Run StateMesh rules
+      if: steps.config.outputs.statemesh == 'true'
+      shell: bash
+      run: bash ${{ github.action_path }}/rules/statemesh.sh

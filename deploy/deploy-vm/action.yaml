@@ -1,0 +1,196 @@
+name: "Deploy VM"
+description: "Deploy to a GCE instance via SSH + Docker Compose (or custom deploy command)"
+
+inputs:
+  project_config:
+    description: "Path to .gigafactory/project.yaml"
+    required: true
+  environment:
+    description: "Target environment (staging, production)"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    # ── Parse strategy_config from project.yaml ─────────────────────────
+    - name: Parse VM config
+      id: vm
+      shell: bash
+      run: |
+        CONFIG="${{ inputs.project_config }}"
+        ENV="${{ inputs.environment }}"
+
+        # Extract strategy_config fields
+        GCP_PROJECT=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'gcp_project:' | awk '{print $2}')
+        ZONE=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'zone:' | awk '{print $2}')
+        VM_NAME=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'vm_name:' | awk '{print $2}')
+        INSTALL_DIR=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'install_dir:' | awk '{print $2}')
+        HEALTH_URL=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'health_url:' | awk '{print $2}')
+        DEPLOY_COMMAND=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'deploy_command:' | sed 's/.*deploy_command:\s*//')
+
+        # Extract environment-specific domain
+        DOMAIN=$(sed -n "/${ENV}:/,/^ *[a-z]/p" "$CONFIG" | grep 'domain:' | awk '{print $2}')
+
+        # Validate required fields
+        if [ -z "$GCP_PROJECT" ] || [ -z "$ZONE" ] || [ -z "$VM_NAME" ]; then
+          echo "::error::Missing required strategy_config fields (gcp_project, zone, vm_name) in $CONFIG"
+          exit 1
+        fi
+
+        echo "gcp_project=$GCP_PROJECT" >> "$GITHUB_OUTPUT"
+        echo "zone=$ZONE" >> "$GITHUB_OUTPUT"
+        echo "vm_name=$VM_NAME" >> "$GITHUB_OUTPUT"
+        echo "install_dir=${INSTALL_DIR:-/var/www/html}" >> "$GITHUB_OUTPUT"
+        echo "health_url=${HEALTH_URL}" >> "$GITHUB_OUTPUT"
+        echo "deploy_command=${DEPLOY_COMMAND}" >> "$GITHUB_OUTPUT"
+        echo "domain=${DOMAIN}" >> "$GITHUB_OUTPUT"
+        echo "image_tag=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+        echo "::notice::Deploying to VM $VM_NAME in $GCP_PROJECT/$ZONE (env: $ENV)"
+
+    # ── Authenticate to GCP via Workload Identity Federation ────────────
+    - name: Authenticate to GCP
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ env.GCP_WIF_PROVIDER || secrets.GCP_WIF_PROVIDER }}
+        service_account: ${{ env.GCP_SA_EMAIL || secrets.GCP_SA_EMAIL }}
+
+    - name: Set up gcloud
+      uses: google-github-actions/setup-gcloud@v2
+
+    # ── Ensure VM is running ────────────────────────────────────────────
+    - name: Ensure VM is running
+      shell: bash
+      run: |
+        GCP_PROJECT="${{ steps.vm.outputs.gcp_project }}"
+        ZONE="${{ steps.vm.outputs.zone }}"
+        VM_NAME="${{ steps.vm.outputs.vm_name }}"
+
+        STATUS=$(gcloud compute instances describe "$VM_NAME" \
+          --zone="$ZONE" --project="$GCP_PROJECT" \
+          --format='value(status)')
+
+        if [ "$STATUS" != "RUNNING" ]; then
+          echo "VM is $STATUS, starting..."
+          gcloud compute instances start "$VM_NAME" \
+            --zone="$ZONE" --project="$GCP_PROJECT"
+
+          for i in $(seq 1 30); do
+            STATUS=$(gcloud compute instances describe "$VM_NAME" \
+              --zone="$ZONE" --project="$GCP_PROJECT" \
+              --format='value(status)')
+            [ "$STATUS" = "RUNNING" ] && break
+            sleep 5
+          done
+          sleep 15
+        fi
+        echo "VM is RUNNING"
+
+    # ── Sync project files to VM ────────────────────────────────────────
+    - name: Sync files to VM
+      shell: bash
+      run: |
+        GCP_PROJECT="${{ steps.vm.outputs.gcp_project }}"
+        ZONE="${{ steps.vm.outputs.zone }}"
+        VM_NAME="${{ steps.vm.outputs.vm_name }}"
+        INSTALL_DIR="${{ steps.vm.outputs.install_dir }}"
+
+        # Ensure install directory exists and is writable
+        gcloud compute ssh "$VM_NAME" \
+          --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
+          --command="
+            sudo mkdir -p ${INSTALL_DIR}
+            sudo chown -R \$(id -un):\$(id -gn) ${INSTALL_DIR}
+          "
+
+        # SCP the project files (excluding .git and node_modules)
+        rsync_exclude="--exclude=.git --exclude=node_modules --exclude=vendor --exclude=.next"
+        gcloud compute scp --recurse \
+          . "$VM_NAME:${INSTALL_DIR}/" \
+          --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
+          --compress
+
+    # ── Execute deploy command on VM ────────────────────────────────────
+    - name: Deploy
+      shell: bash
+      run: |
+        GCP_PROJECT="${{ steps.vm.outputs.gcp_project }}"
+        ZONE="${{ steps.vm.outputs.zone }}"
+        VM_NAME="${{ steps.vm.outputs.vm_name }}"
+        INSTALL_DIR="${{ steps.vm.outputs.install_dir }}"
+        DEPLOY_COMMAND="${{ steps.vm.outputs.deploy_command }}"
+        IMAGE_TAG="${{ steps.vm.outputs.image_tag }}"
+
+        if [ -n "$DEPLOY_COMMAND" ]; then
+          # Use custom deploy command from strategy_config
+          echo "Running custom deploy command..."
+          gcloud compute ssh "$VM_NAME" \
+            --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
+            --command="cd ${INSTALL_DIR} && sudo bash -c 'export IMAGE_TAG=${IMAGE_TAG} && ${DEPLOY_COMMAND}'"
+        elif [ -f "docker-compose.yml" ] || [ -f "docker-compose.prod.yml" ] || [ -f "docker/docker-compose.prod.yml" ]; then
+          # Default: Docker Compose deploy
+          echo "Running Docker Compose deploy..."
+          COMPOSE_FILE="docker-compose.yml"
+          [ -f "docker-compose.prod.yml" ] && COMPOSE_FILE="docker-compose.prod.yml"
+          [ -f "docker/docker-compose.prod.yml" ] && COMPOSE_FILE="docker/docker-compose.prod.yml"
+
+          gcloud compute ssh "$VM_NAME" \
+            --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
+            --command="sudo bash -s" << REMOTE_SCRIPT
+          set -euo pipefail
+          cd ${INSTALL_DIR}
+          docker compose -f ${COMPOSE_FILE} pull 2>/dev/null || true
+          docker compose -f ${COMPOSE_FILE} up -d --remove-orphans
+          docker image prune -a -f --filter 'until=1h' 2>/dev/null || true
+          echo "Deploy complete"
+          REMOTE_SCRIPT
+        else
+          # Fallback: Laravel / PHP app deploy
+          echo "Running standard deploy (Laravel/PHP)..."
+          gcloud compute ssh "$VM_NAME" \
+            --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
+            --command="sudo bash -s" << 'REMOTE_SCRIPT'
+          set -euo pipefail
+          cd ${INSTALL_DIR}
+          composer install --no-dev --optimize-autoloader 2>/dev/null || true
+          php artisan config:clear 2>/dev/null || true
+          php artisan cache:clear 2>/dev/null || true
+          php artisan migrate --force 2>/dev/null || true
+          php artisan queue:restart 2>/dev/null || true
+          sudo systemctl reload apache2 2>/dev/null || sudo systemctl reload nginx 2>/dev/null || true
+          echo "Deploy complete"
+          REMOTE_SCRIPT
+        fi
+
+    # ── Health check ────────────────────────────────────────────────────
+    - name: Health check
+      shell: bash
+      run: |
+        HEALTH_URL="${{ steps.vm.outputs.health_url }}"
+        DOMAIN="${{ steps.vm.outputs.domain }}"
+
+        # Use explicit health_url if set, otherwise try domain
+        if [ -z "$HEALTH_URL" ] && [ -n "$DOMAIN" ]; then
+          HEALTH_URL="https://${DOMAIN}/api/health"
+        fi
+
+        if [ -z "$HEALTH_URL" ]; then
+          echo "::warning::No health_url or domain configured — skipping health check"
+          exit 0
+        fi
+
+        echo "Checking ${HEALTH_URL}..."
+        for i in $(seq 1 12); do
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 10 "$HEALTH_URL" 2>/dev/null || echo "000")
+
+          if [ "$STATUS" = "200" ]; then
+            echo "Health check passed (200)"
+            exit 0
+          fi
+          echo "  Attempt $i: got $STATUS, retrying in 10s..."
+          sleep 10
+        done
+
+        echo "::error::Health check failed after 2 minutes at ${HEALTH_URL}"
+        exit 1

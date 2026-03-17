@@ -1,0 +1,73 @@
+name: "Deploy"
+description: "Strategy-dispatching deploy action — reads deployment config and delegates"
+
+inputs:
+  project_config:
+    description: "Path to .gigafactory/project.yaml"
+    required: true
+  environment:
+    description: "Target environment (staging, production)"
+    required: true
+  strategy:
+    description: "Deployment strategy (vm, gke-autopilot, cloudflare-pages, docker-compose)"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run pre-deploy hooks
+      shell: bash
+      run: |
+        CONFIG="${{ inputs.project_config }}"
+        # Extract pre_deploy hooks (simple YAML parsing)
+        hooks=$(sed -n '/pre_deploy:/,/post_deploy:/p' "$CONFIG" 2>/dev/null | \
+          grep '^\s*-' | sed 's/^\s*-\s*//' || true)
+        if [ -n "$hooks" ]; then
+          echo "Running pre-deploy hooks..."
+          while IFS= read -r hook; do
+            echo "  → $hook"
+            eval "$hook"
+          done <<< "$hooks"
+        fi
+
+    - name: Deploy VM
+      if: inputs.strategy == 'vm'
+      uses: ./.github/actions/deploy/deploy-vm
+      with:
+        project_config: ${{ inputs.project_config }}
+        environment: ${{ inputs.environment }}
+
+    - name: Deploy GKE
+      if: inputs.strategy == 'gke-autopilot'
+      uses: ./.github/actions/deploy/deploy-gke
+      with:
+        project_config: ${{ inputs.project_config }}
+        environment: ${{ inputs.environment }}
+
+    - name: Deploy Cloudflare
+      if: inputs.strategy == 'cloudflare-pages'
+      uses: ./.github/actions/deploy/deploy-cloudflare
+      with:
+        project_config: ${{ inputs.project_config }}
+        environment: ${{ inputs.environment }}
+
+    - name: Deploy Docker
+      if: inputs.strategy == 'docker-compose'
+      uses: ./.github/actions/deploy/deploy-docker
+      with:
+        project_config: ${{ inputs.project_config }}
+        environment: ${{ inputs.environment }}
+
+    - name: Run post-deploy hooks
+      shell: bash
+      run: |
+        CONFIG="${{ inputs.project_config }}"
+        hooks=$(sed -n '/post_deploy:/,/^[^ ]/p' "$CONFIG" 2>/dev/null | \
+          grep '^\s*-' | sed 's/^\s*-\s*//' || true)
+        if [ -n "$hooks" ]; then
+          echo "Running post-deploy hooks..."
+          while IFS= read -r hook; do
+            echo "  → $hook"
+            eval "$hook"
+          done <<< "$hooks"
+        fi

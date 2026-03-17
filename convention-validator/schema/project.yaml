@@ -1,0 +1,72 @@
+# JSON Schema for .gigafactory/project.yaml validation.
+# Used by the convention-validator action.
+# Note: This is a simplified schema; the proto definition is the source of truth.
+type: object
+required: [gigafactory]
+properties:
+  gigafactory:
+    type: object
+    required: [version, managed, project, stack]
+    properties:
+      version:
+        type: integer
+        minimum: 1
+      managed:
+        type: boolean
+      project:
+        type: object
+        required: [name]
+        properties:
+          name:
+            type: string
+            minLength: 1
+          description:
+            type: string
+          team:
+            type: string
+      stack:
+        type: object
+        required: [language]
+        properties:
+          language:
+            type: string
+            enum: [go, typescript, javascript, python, rust]
+          framework:
+            type: string
+          database:
+            type: string
+          runtime:
+            type: string
+          statemesh:
+            type: boolean
+      quality:
+        type: object
+        properties:
+          require_tests:
+            type: boolean
+          min_coverage:
+            type: integer
+            minimum: 0
+            maximum: 100
+          require_type_checking:
+            type: boolean
+          require_linting:
+            type: boolean
+          max_file_length:
+            type: integer
+            minimum: 1
+          linters:
+            type: array
+            items:
+              type: string
+      deployment:
+        type: object
+        properties:
+          strategy:
+            type: string
+          environments:
+            type: object
+      integrations:
+        type: object
+      agents:
+        type: object
