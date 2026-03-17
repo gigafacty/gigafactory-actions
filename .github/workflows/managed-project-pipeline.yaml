@@ -1,0 +1,169 @@
+# Reusable CI/CD pipeline for Gigafactory-managed projects.
+# Called by each project's .github/workflows/gigafactory.yaml dispatcher.
+#
+# Full pipeline: parse → lint → typecheck → test → conventions → security → deploy
+name: Managed Project Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      project_config:
+        description: "Path to .gigafactory/project.yaml"
+        required: true
+        type: string
+
+jobs:
+  # ── Parse project manifest ─────────────────────────────────────────────────
+  parse-config:
+    runs-on: ubuntu-latest
+    outputs:
+      language: ${{ steps.parse.outputs.language }}
+      framework: ${{ steps.parse.outputs.framework }}
+      statemesh: ${{ steps.parse.outputs.statemesh }}
+      require_tests: ${{ steps.parse.outputs.require_tests }}
+      require_linting: ${{ steps.parse.outputs.require_linting }}
+      require_type_checking: ${{ steps.parse.outputs.require_type_checking }}
+      min_coverage: ${{ steps.parse.outputs.min_coverage }}
+      deploy_strategy: ${{ steps.parse.outputs.deploy_strategy }}
+      staging_auto_deploy: ${{ steps.parse.outputs.staging_auto_deploy }}
+      production_auto_deploy: ${{ steps.parse.outputs.production_auto_deploy }}
+      require_conventions: ${{ steps.parse.outputs.require_conventions }}
+      require_security: ${{ steps.parse.outputs.require_security }}
+      gcp_project: ${{ steps.parse.outputs.gcp_project }}
+      zone: ${{ steps.parse.outputs.zone }}
+      vm_name: ${{ steps.parse.outputs.vm_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: parse
+        run: |
+          CONFIG="${{ inputs.project_config }}"
+          if [ ! -f "$CONFIG" ]; then
+            echo "::error::Project config not found at $CONFIG"
+            exit 1
+          fi
+          echo "language=$(grep 'language:' "$CONFIG" | head -1 | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "framework=$(grep 'framework:' "$CONFIG" | head -1 | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "statemesh=$(grep 'statemesh:' "$CONFIG" | head -1 | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "require_tests=$(grep 'require_tests:' "$CONFIG" | head -1 | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "require_linting=$(grep 'require_linting:' "$CONFIG" | head -1 | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "require_type_checking=$(grep 'require_type_checking:' "$CONFIG" | head -1 | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "min_coverage=$(grep 'min_coverage:' "$CONFIG" | head -1 | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "deploy_strategy=$(grep 'strategy:' "$CONFIG" | head -1 | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          # Check environment auto_deploy flags
+          echo "staging_auto_deploy=$(sed -n '/staging:/,/^ /p' "$CONFIG" | grep 'auto_deploy:' | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "production_auto_deploy=$(sed -n '/production:/,/^ /p' "$CONFIG" | grep 'auto_deploy:' | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          # Extract strategy_config fields (used by deploy actions)
+          echo "gcp_project=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'gcp_project:' | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "zone=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'zone:' | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "vm_name=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'vm_name:' | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          # Convention and security flags (default true if not specified)
+          REQUIRE_CONVENTIONS=$(grep 'require_conventions:' "$CONFIG" | head -1 | awk '{print $2}')
+          echo "require_conventions=${REQUIRE_CONVENTIONS:-true}" >> "$GITHUB_OUTPUT"
+          REQUIRE_SECURITY=$(grep 'require_security:' "$CONFIG" | head -1 | awk '{print $2}')
+          echo "require_security=${REQUIRE_SECURITY:-true}" >> "$GITHUB_OUTPUT"
+
+  # ── Lint ────────────────────────────────────────────────────────────────────
+  lint:
+    needs: parse-config
+    if: needs.parse-config.outputs.require_linting == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gigafacty/gigafactory-actions/setup-stack@main
+        with:
+          language: ${{ needs.parse-config.outputs.language }}
+      - uses: gigafacty/gigafactory-actions/lint@main
+        with:
+          language: ${{ needs.parse-config.outputs.language }}
+
+  # ── Type Check ──────────────────────────────────────────────────────────────
+  typecheck:
+    needs: parse-config
+    if: needs.parse-config.outputs.require_type_checking == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gigafacty/gigafactory-actions/setup-stack@main
+        with:
+          language: ${{ needs.parse-config.outputs.language }}
+      - uses: gigafacty/gigafactory-actions/typecheck@main
+        with:
+          language: ${{ needs.parse-config.outputs.language }}
+
+  # ── Test ────────────────────────────────────────────────────────────────────
+  test:
+    needs: parse-config
+    if: needs.parse-config.outputs.require_tests == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gigafacty/gigafactory-actions/setup-stack@main
+        with:
+          language: ${{ needs.parse-config.outputs.language }}
+      - uses: gigafacty/gigafactory-actions/test@main
+        with:
+          language: ${{ needs.parse-config.outputs.language }}
+          min_coverage: ${{ needs.parse-config.outputs.min_coverage }}
+
+  # ── Convention Validator ────────────────────────────────────────────────────
+  conventions:
+    needs: parse-config
+    if: needs.parse-config.outputs.require_conventions == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gigafacty/gigafactory-actions/convention-validator@main
+        with:
+          project_config: ${{ inputs.project_config }}
+
+  # ── Security Scan ──────────────────────────────────────────────────────────
+  security:
+    needs: parse-config
+    if: needs.parse-config.outputs.require_security == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: gigafacty/gigafactory-actions/setup-stack@main
+        with:
+          language: ${{ needs.parse-config.outputs.language }}
+      - uses: gigafacty/gigafactory-actions/security-scan@main
+        with:
+          language: ${{ needs.parse-config.outputs.language }}
+
+  # ── Deploy Staging ──────────────────────────────────────────────────────────
+  deploy-staging:
+    needs: [parse-config, lint, typecheck, test, conventions, security]
+    if: |
+      always() &&
+      github.event_name == 'push' &&
+      needs.parse-config.outputs.staging_auto_deploy == 'true' &&
+      !contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gigafacty/gigafactory-actions/deploy@main
+        with:
+          project_config: ${{ inputs.project_config }}
+          environment: staging
+          strategy: ${{ needs.parse-config.outputs.deploy_strategy }}
+
+  # ── Deploy Production (gated by GitHub environment approval) ───────────────
+  deploy-production:
+    needs: [parse-config, deploy-staging, lint, typecheck, test, conventions, security]
+    if: |
+      always() &&
+      github.event_name == 'push' &&
+      needs.parse-config.outputs.production_auto_deploy == 'true' &&
+      !contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gigafacty/gigafactory-actions/deploy@main
+        with:
+          project_config: ${{ inputs.project_config }}
+          environment: production
+          strategy: ${{ needs.parse-config.outputs.deploy_strategy }}
