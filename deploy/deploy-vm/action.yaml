@@ -20,16 +20,16 @@ runs:
         CONFIG="${{ inputs.project_config }}"
         ENV="${{ inputs.environment }}"
 
-        # Extract strategy_config fields
-        GCP_PROJECT=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'gcp_project:' | awk '{print $2}')
-        ZONE=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'zone:' | awk '{print $2}')
-        VM_NAME=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'vm_name:' | awk '{print $2}')
-        INSTALL_DIR=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'install_dir:' | awk '{print $2}')
-        HEALTH_URL=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'health_url:' | awk '{print $2}')
-        DEPLOY_COMMAND=$(sed -n '/strategy_config:/,/^  [^ ]/p' "$CONFIG" | grep 'deploy_command:' | sed 's/.*deploy_command:\s*//')
+        # Extract strategy_config fields (simple grep — works regardless of indentation)
+        GCP_PROJECT=$(grep 'gcp_project:' "$CONFIG" | head -1 | awk '{print $2}')
+        ZONE=$(grep 'zone:' "$CONFIG" | head -1 | awk '{print $2}')
+        VM_NAME=$(grep 'vm_name:' "$CONFIG" | head -1 | awk '{print $2}')
+        INSTALL_DIR=$(grep 'install_dir:' "$CONFIG" | head -1 | awk '{print $2}')
+        HEALTH_URL=$(grep 'health_url:' "$CONFIG" | head -1 | awk '{print $2}')
+        DEPLOY_COMMAND=$(grep 'deploy_command:' "$CONFIG" | head -1 | sed 's/.*deploy_command:\s*//')
 
         # Extract environment-specific domain
-        DOMAIN=$(sed -n "/${ENV}:/,/^ *[a-z]/p" "$CONFIG" | grep 'domain:' | awk '{print $2}')
+        DOMAIN=$(grep -A5 "${ENV}:" "$CONFIG" | grep 'domain:' | head -1 | awk '{print $2}')
 
         # Validate required fields
         if [ -z "$GCP_PROJECT" ] || [ -z "$ZONE" ] || [ -z "$VM_NAME" ]; then
@@ -52,8 +52,8 @@ runs:
     - name: Authenticate to GCP
       uses: google-github-actions/auth@v2
       with:
-        workload_identity_provider: ${{ env.GCP_WIF_PROVIDER || secrets.GCP_WIF_PROVIDER }}
-        service_account: ${{ env.GCP_SA_EMAIL || secrets.GCP_SA_EMAIL }}
+        workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+        service_account: ${{ env.GCP_SA_EMAIL }}
 
     - name: Set up gcloud
       uses: google-github-actions/setup-gcloud@v2
@@ -127,11 +127,12 @@ runs:
           gcloud compute ssh "$VM_NAME" \
             --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
             --command="cd ${INSTALL_DIR} && sudo bash -c 'export IMAGE_TAG=${IMAGE_TAG} && ${DEPLOY_COMMAND}'"
-        elif [ -f "docker-compose.yml" ] || [ -f "docker-compose.prod.yml" ] || [ -f "docker/docker-compose.prod.yml" ]; then
+        elif [ -f "docker-compose.yml" ] || [ -f "docker-compose.prod.yml" ] || [ -f "docker/docker-compose.prod.yml" ] || [ -f "docker/docker-compose.dev.yml" ]; then
           # Default: Docker Compose deploy
           echo "Running Docker Compose deploy..."
           COMPOSE_FILE="docker-compose.yml"
           [ -f "docker-compose.prod.yml" ] && COMPOSE_FILE="docker-compose.prod.yml"
+          [ -f "docker/docker-compose.dev.yml" ] && COMPOSE_FILE="docker/docker-compose.dev.yml"
           [ -f "docker/docker-compose.prod.yml" ] && COMPOSE_FILE="docker/docker-compose.prod.yml"
 
           gcloud compute ssh "$VM_NAME" \

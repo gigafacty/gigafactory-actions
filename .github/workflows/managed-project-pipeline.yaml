@@ -143,6 +143,9 @@ jobs:
       !contains(needs.*.result, 'failure')
     runs-on: ubuntu-latest
     environment: staging
+    env:
+      GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+      GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
     steps:
       - uses: actions/checkout@v4
       - uses: gigafacty/gigafactory-actions/deploy@main
@@ -162,6 +165,9 @@ jobs:
       !contains(needs.*.result, 'failure')
     runs-on: ubuntu-latest
     environment: production
+    env:
+      GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+      GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
     steps:
       - uses: actions/checkout@v4
       - uses: gigafacty/gigafactory-actions/deploy@main
