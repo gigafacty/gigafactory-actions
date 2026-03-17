@@ -32,28 +32,28 @@ runs:
 
     - name: Deploy VM
       if: inputs.strategy == 'vm'
-      uses: ./.github/actions/deploy/deploy-vm
+      uses: gigafacty/gigafactory-actions/deploy/deploy-vm@main
       with:
         project_config: ${{ inputs.project_config }}
         environment: ${{ inputs.environment }}
 
     - name: Deploy GKE
       if: inputs.strategy == 'gke-autopilot'
-      uses: ./.github/actions/deploy/deploy-gke
+      uses: gigafacty/gigafactory-actions/deploy/deploy-gke@main
       with:
         project_config: ${{ inputs.project_config }}
         environment: ${{ inputs.environment }}
 
     - name: Deploy Cloudflare
       if: inputs.strategy == 'cloudflare-pages'
-      uses: ./.github/actions/deploy/deploy-cloudflare
+      uses: gigafacty/gigafactory-actions/deploy/deploy-cloudflare@main
       with:
         project_config: ${{ inputs.project_config }}
         environment: ${{ inputs.environment }}
 
     - name: Deploy Docker
       if: inputs.strategy == 'docker-compose'
-      uses: ./.github/actions/deploy/deploy-docker
+      uses: gigafacty/gigafactory-actions/deploy/deploy-docker@main
       with:
         project_config: ${{ inputs.project_config }}
         environment: ${{ inputs.environment }}
