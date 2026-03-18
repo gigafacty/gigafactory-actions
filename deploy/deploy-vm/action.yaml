@@ -153,8 +153,10 @@ runs:
           --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
           --command="
             sudo mkdir -p ${DIRS}
-            sudo chown -R \$(id -un):\$(id -gn) ${INSTALL_DIR}
-            sudo chown \$(id -un):\$(id -gn) ${INSTALL_DIR}/.env 2>/dev/null || true
+            sudo chown \$(id -un):\$(id -gn) ${INSTALL_DIR}
+            for d in docker scripts .env; do
+              [ -e ${INSTALL_DIR}/\$d ] && sudo chown -R \$(id -un):\$(id -gn) ${INSTALL_DIR}/\$d
+            done
           "
 
     # ── Deploy SSL certificates from Secret Manager ─────────────────────
