@@ -11,6 +11,19 @@ on:
         description: "Path to .gigafactory/project.yaml"
         required: true
         type: string
+    secrets:
+      GCP_WIF_PROVIDER:
+        description: "GCP Workload Identity Federation provider"
+        required: false
+      GCP_SA_EMAIL:
+        description: "GCP service account email for deployment"
+        required: false
+      APP_ID:
+        description: "GitHub App ID for private module access"
+        required: false
+      APP_PRIVATE_KEY:
+        description: "GitHub App private key"
+        required: false
 
 permissions:
   contents: read
