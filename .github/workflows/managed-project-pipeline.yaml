@@ -142,10 +142,16 @@ jobs:
       needs.parse-config.outputs.staging_auto_deploy == 'true' &&
       !contains(needs.*.result, 'failure')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
     environment: staging
     env:
       GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
       GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GHCR_ACTOR: ${{ github.actor }}
     steps:
       - uses: actions/checkout@v4
       - uses: gigafacty/gigafactory-actions/deploy@main
@@ -164,10 +170,16 @@ jobs:
       needs.parse-config.outputs.production_auto_deploy == 'true' &&
       !contains(needs.*.result, 'failure')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
     environment: production
     env:
       GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
       GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GHCR_ACTOR: ${{ github.actor }}
     steps:
       - uses: actions/checkout@v4
       - uses: gigafacty/gigafactory-actions/deploy@main

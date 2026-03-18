@@ -1,5 +1,29 @@
+# ==============================================================================
+# Deploy VM — shared action for Gigafactory-managed projects
+#
+# Deploys to a GCE VM via SSH (IAP tunnel). Supports:
+#   - COS (Container-Optimized OS) Docker quirks
+#   - GHCR authentication + IMAGE_TAG management
+#   - SSL certificate deployment from Secret Manager
+#   - Docker Compose pull/up with error handling
+#   - Post-start scripts for project-specific setup
+#   - Laravel/PHP fallback for non-Docker projects
+#
+# Config is read from .gigafactory/project.yaml strategy_config:
+#   gcp_project, zone, vm_name, install_dir       — required
+#   health_url, domain                             — for health check
+#   compose_file                                   — explicit compose file path
+#   cos_vm: true                                   — enable COS Docker quirks
+#   ghcr_enabled: true                             — enable GHCR login
+#   ssl_cert_secret, ssl_key_secret                — Secret Manager secret names
+#   ssl_cert_dest, ssl_key_dest                    — dest paths relative to install_dir
+#   sync_dirs                                      — comma-separated dirs to sync (default: all)
+#   post_start_script                              — script path to run on VM after compose up
+#   deploy_command                                 — custom deploy command (overrides compose)
+# ==============================================================================
+
 name: "Deploy VM"
-description: "Deploy to a GCE instance via SSH + Docker Compose (or custom deploy command)"
+description: "Deploy to a GCE instance via SSH + Docker Compose (COS-aware, GHCR-aware)"
 
 inputs:
   project_config:
@@ -20,16 +44,29 @@ runs:
         CONFIG="${{ inputs.project_config }}"
         ENV="${{ inputs.environment }}"
 
-        # Extract strategy_config fields (simple grep — works regardless of indentation)
-        GCP_PROJECT=$(grep 'gcp_project:' "$CONFIG" | head -1 | awk '{print $2}')
-        ZONE=$(grep 'zone:' "$CONFIG" | head -1 | awk '{print $2}')
-        VM_NAME=$(grep 'vm_name:' "$CONFIG" | head -1 | awk '{print $2}')
-        INSTALL_DIR=$(grep 'install_dir:' "$CONFIG" | head -1 | awk '{print $2}')
-        HEALTH_URL=$(grep 'health_url:' "$CONFIG" | head -1 | awk '{print $2}')
-        DEPLOY_COMMAND=$(grep 'deploy_command:' "$CONFIG" | head -1 | sed 's/.*deploy_command:\s*//')
+        # Required fields
+        GCP_PROJECT=$(grep 'gcp_project:' "$CONFIG" | head -1 | awk '{print $2}' || true)
+        ZONE=$(grep 'zone:' "$CONFIG" | head -1 | awk '{print $2}' || true)
+        VM_NAME=$(grep 'vm_name:' "$CONFIG" | head -1 | awk '{print $2}' || true)
+        INSTALL_DIR=$(grep 'install_dir:' "$CONFIG" | head -1 | awk '{print $2}' || true)
+        HEALTH_URL=$(grep 'health_url:' "$CONFIG" | head -1 | awk '{print $2}' || true)
 
-        # Extract environment-specific domain
-        DOMAIN=$(grep -A5 "${ENV}:" "$CONFIG" | grep 'domain:' | head -1 | awk '{print $2}')
+        # Optional fields (|| true to avoid exit-on-error when field is absent)
+        DEPLOY_COMMAND=$(grep 'deploy_command:' "$CONFIG" | head -1 | sed 's/.*deploy_command:\s*//' || true)
+        COMPOSE_FILE=$(grep 'compose_file:' "$CONFIG" | head -1 | awk '{print $2}' || true)
+        COS_VM=$(grep 'cos_vm:' "$CONFIG" | head -1 | awk '{print $2}' || true)
+        GHCR_ENABLED=$(grep 'ghcr_enabled:' "$CONFIG" | head -1 | awk '{print $2}' || true)
+        SYNC_DIRS=$(grep 'sync_dirs:' "$CONFIG" | head -1 | sed 's/.*sync_dirs:\s*//' || true)
+        POST_START_SCRIPT=$(grep 'post_start_script:' "$CONFIG" | head -1 | awk '{print $2}' || true)
+
+        # SSL cert config
+        SSL_CERT_SECRET=$(grep 'ssl_cert_secret:' "$CONFIG" | head -1 | awk '{print $2}' || true)
+        SSL_KEY_SECRET=$(grep 'ssl_key_secret:' "$CONFIG" | head -1 | awk '{print $2}' || true)
+        SSL_CERT_DEST=$(grep 'ssl_cert_dest:' "$CONFIG" | head -1 | awk '{print $2}' || true)
+        SSL_KEY_DEST=$(grep 'ssl_key_dest:' "$CONFIG" | head -1 | awk '{print $2}' || true)
+
+        # Environment-specific domain
+        DOMAIN=$(grep -A5 "${ENV}:" "$CONFIG" | grep 'domain:' | head -1 | awk '{print $2}' || true)
 
         # Validate required fields
         if [ -z "$GCP_PROJECT" ] || [ -z "$ZONE" ] || [ -z "$VM_NAME" ]; then
@@ -43,10 +80,19 @@ runs:
         echo "install_dir=${INSTALL_DIR:-/var/www/html}" >> "$GITHUB_OUTPUT"
         echo "health_url=${HEALTH_URL}" >> "$GITHUB_OUTPUT"
         echo "deploy_command=${DEPLOY_COMMAND}" >> "$GITHUB_OUTPUT"
+        echo "compose_file=${COMPOSE_FILE}" >> "$GITHUB_OUTPUT"
+        echo "cos_vm=${COS_VM:-false}" >> "$GITHUB_OUTPUT"
+        echo "ghcr_enabled=${GHCR_ENABLED:-false}" >> "$GITHUB_OUTPUT"
+        echo "sync_dirs=${SYNC_DIRS}" >> "$GITHUB_OUTPUT"
+        echo "post_start_script=${POST_START_SCRIPT}" >> "$GITHUB_OUTPUT"
+        echo "ssl_cert_secret=${SSL_CERT_SECRET}" >> "$GITHUB_OUTPUT"
+        echo "ssl_key_secret=${SSL_KEY_SECRET}" >> "$GITHUB_OUTPUT"
+        echo "ssl_cert_dest=${SSL_CERT_DEST}" >> "$GITHUB_OUTPUT"
+        echo "ssl_key_dest=${SSL_KEY_DEST}" >> "$GITHUB_OUTPUT"
         echo "domain=${DOMAIN}" >> "$GITHUB_OUTPUT"
         echo "image_tag=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
-        echo "::notice::Deploying to VM $VM_NAME in $GCP_PROJECT/$ZONE (env: $ENV)"
+        echo "::notice::Deploying to VM $VM_NAME in $GCP_PROJECT/$ZONE (env: $ENV, cos: ${COS_VM:-false}, ghcr: ${GHCR_ENABLED:-false})"
 
     # ── Authenticate to GCP via Workload Identity Federation ────────────
     - name: Authenticate to GCP
@@ -82,11 +128,77 @@ runs:
             [ "$STATUS" = "RUNNING" ] && break
             sleep 5
           done
+          # Give Docker time to start
           sleep 15
         fi
         echo "VM is RUNNING"
 
-    # ── Sync project files to VM ────────────────────────────────────────
+    # ── Fix directory permissions ───────────────────────────────────────
+    - name: Fix VM directory permissions
+      shell: bash
+      run: |
+        GCP_PROJECT="${{ steps.vm.outputs.gcp_project }}"
+        ZONE="${{ steps.vm.outputs.zone }}"
+        VM_NAME="${{ steps.vm.outputs.vm_name }}"
+        INSTALL_DIR="${{ steps.vm.outputs.install_dir }}"
+        SSL_CERT_DEST="${{ steps.vm.outputs.ssl_cert_dest }}"
+
+        # Build list of dirs to create
+        DIRS="${INSTALL_DIR}"
+        if [ -n "$SSL_CERT_DEST" ]; then
+          DIRS="${DIRS} ${INSTALL_DIR}/$(dirname ${SSL_CERT_DEST})"
+        fi
+
+        gcloud compute ssh "$VM_NAME" \
+          --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
+          --command="
+            sudo mkdir -p ${DIRS}
+            sudo chown -R \$(id -un):\$(id -gn) ${INSTALL_DIR}
+            sudo chown \$(id -un):\$(id -gn) ${INSTALL_DIR}/.env 2>/dev/null || true
+          "
+
+    # ── Deploy SSL certificates from Secret Manager ─────────────────────
+    - name: Deploy SSL certificates
+      if: steps.vm.outputs.ssl_cert_secret != ''
+      shell: bash
+      run: |
+        GCP_PROJECT="${{ steps.vm.outputs.gcp_project }}"
+        ZONE="${{ steps.vm.outputs.zone }}"
+        VM_NAME="${{ steps.vm.outputs.vm_name }}"
+        INSTALL_DIR="${{ steps.vm.outputs.install_dir }}"
+        SSL_CERT_SECRET="${{ steps.vm.outputs.ssl_cert_secret }}"
+        SSL_KEY_SECRET="${{ steps.vm.outputs.ssl_key_secret }}"
+        SSL_CERT_DEST="${{ steps.vm.outputs.ssl_cert_dest }}"
+        SSL_KEY_DEST="${{ steps.vm.outputs.ssl_key_dest }}"
+
+        mkdir -p /tmp/certs
+        gcloud secrets versions access latest --secret="$SSL_CERT_SECRET" --project="$GCP_PROJECT" > /tmp/certs/cert.pem
+        gcloud secrets versions access latest --secret="$SSL_KEY_SECRET" --project="$GCP_PROJECT" > /tmp/certs/key.pem
+        chmod 600 /tmp/certs/key.pem
+
+        # SCP individual files to VM
+        gcloud compute scp \
+          /tmp/certs/cert.pem \
+          "$VM_NAME:${INSTALL_DIR}/${SSL_CERT_DEST}" \
+          --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap
+
+        gcloud compute scp \
+          /tmp/certs/key.pem \
+          "$VM_NAME:${INSTALL_DIR}/${SSL_KEY_DEST}" \
+          --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap
+
+        # Fix ownership — certs should be readable by Caddy (runs as root in container)
+        gcloud compute ssh "$VM_NAME" \
+          --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
+          --command="
+            sudo chown root:root ${INSTALL_DIR}/${SSL_CERT_DEST} ${INSTALL_DIR}/${SSL_KEY_DEST}
+            sudo chmod 600 ${INSTALL_DIR}/${SSL_KEY_DEST}
+          "
+
+        echo "SSL certificates deployed"
+        rm -rf /tmp/certs
+
+    # ── Sync project files to VM ──────────────────────────────────────────
     - name: Sync files to VM
       shell: bash
       run: |
@@ -94,23 +206,32 @@ runs:
         ZONE="${{ steps.vm.outputs.zone }}"
         VM_NAME="${{ steps.vm.outputs.vm_name }}"
         INSTALL_DIR="${{ steps.vm.outputs.install_dir }}"
+        SYNC_DIRS="${{ steps.vm.outputs.sync_dirs }}"
 
-        # Ensure install directory exists and is writable
-        gcloud compute ssh "$VM_NAME" \
-          --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
-          --command="
-            sudo mkdir -p ${INSTALL_DIR}
-            sudo chown -R \$(id -un):\$(id -gn) ${INSTALL_DIR}
-          "
+        if [ -n "$SYNC_DIRS" ]; then
+          # Sync only specified directories (comma-separated)
+          IFS=',' read -ra DIRS <<< "$SYNC_DIRS"
+          for dir in "${DIRS[@]}"; do
+            dir=$(echo "$dir" | xargs)  # trim whitespace
+            if [ -d "$dir" ] || [ -f "$dir" ]; then
+              echo "Syncing $dir → $INSTALL_DIR/$dir"
+              gcloud compute scp --recurse \
+                "$dir" "$VM_NAME:${INSTALL_DIR}/" \
+                --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
+                --compress
+            else
+              echo "::warning::Sync target '$dir' not found, skipping"
+            fi
+          done
+        else
+          # Default: sync entire project (excluding heavy dirs)
+          gcloud compute scp --recurse \
+            . "$VM_NAME:${INSTALL_DIR}/" \
+            --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
+            --compress
+        fi
 
-        # SCP the project files (excluding .git and node_modules)
-        rsync_exclude="--exclude=.git --exclude=node_modules --exclude=vendor --exclude=.next"
-        gcloud compute scp --recurse \
-          . "$VM_NAME:${INSTALL_DIR}/" \
-          --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
-          --compress
-
-    # ── Execute deploy command on VM ────────────────────────────────────
+    # ── Deploy ─────────────────────────────────────────────────────────────
     - name: Deploy
       shell: bash
       run: |
@@ -120,47 +241,126 @@ runs:
         INSTALL_DIR="${{ steps.vm.outputs.install_dir }}"
         DEPLOY_COMMAND="${{ steps.vm.outputs.deploy_command }}"
         IMAGE_TAG="${{ steps.vm.outputs.image_tag }}"
+        COS_VM="${{ steps.vm.outputs.cos_vm }}"
+        GHCR_ENABLED="${{ steps.vm.outputs.ghcr_enabled }}"
+        COMPOSE_FILE="${{ steps.vm.outputs.compose_file }}"
+        POST_START_SCRIPT="${{ steps.vm.outputs.post_start_script }}"
 
+        # --- Custom deploy command ---
         if [ -n "$DEPLOY_COMMAND" ]; then
-          # Use custom deploy command from strategy_config
           echo "Running custom deploy command..."
           gcloud compute ssh "$VM_NAME" \
             --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
             --command="cd ${INSTALL_DIR} && sudo bash -c 'export IMAGE_TAG=${IMAGE_TAG} && ${DEPLOY_COMMAND}'"
-        elif [ -f "docker-compose.yml" ] || [ -f "docker-compose.prod.yml" ] || [ -f "docker/docker-compose.prod.yml" ] || [ -f "docker/docker-compose.dev.yml" ]; then
-          # Default: Docker Compose deploy
-          echo "Running Docker Compose deploy..."
-          COMPOSE_FILE="docker-compose.yml"
-          [ -f "docker-compose.prod.yml" ] && COMPOSE_FILE="docker-compose.prod.yml"
-          [ -f "docker/docker-compose.dev.yml" ] && COMPOSE_FILE="docker/docker-compose.dev.yml"
-          [ -f "docker/docker-compose.prod.yml" ] && COMPOSE_FILE="docker/docker-compose.prod.yml"
+          exit 0
+        fi
+
+        # --- Auto-detect compose file if not explicit ---
+        if [ -z "$COMPOSE_FILE" ]; then
+          for f in docker/docker-compose.prod.yml docker/docker-compose.dev.yml docker-compose.prod.yml docker-compose.yml; do
+            if [ -f "$f" ]; then
+              COMPOSE_FILE="$f"
+              break
+            fi
+          done
+        fi
+
+        # --- Docker Compose deploy ---
+        if [ -n "$COMPOSE_FILE" ]; then
+          echo "Deploying with Docker Compose ($COMPOSE_FILE)..."
+
+          # Prepare GHCR credentials for remote script
+          GHCR_TOKEN="${{ env.GHCR_TOKEN }}"
+          GHCR_ACTOR="${{ env.GHCR_ACTOR }}"
 
           gcloud compute ssh "$VM_NAME" \
             --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
             --command="sudo bash -s" << REMOTE_SCRIPT
-          set -euo pipefail
-          cd ${INSTALL_DIR}
-          docker compose -f ${COMPOSE_FILE} pull 2>/dev/null || true
-          docker compose -f ${COMPOSE_FILE} up -d --remove-orphans
-          docker image prune -a -f --filter 'until=1h' 2>/dev/null || true
-          echo "Deploy complete"
-          REMOTE_SCRIPT
+        set -euo pipefail
+
+        # COS Docker config: writable docker config on stateful partition
+        if [ "${COS_VM}" = "true" ]; then
+          mount -o remount,exec /mnt/stateful_partition 2>/dev/null || true
+          export DOCKER_CONFIG=/mnt/stateful_partition/.docker
+          mkdir -p "\$DOCKER_CONFIG/cli-plugins"
+
+          # Install docker compose plugin if missing
+          if ! DOCKER_CONFIG="\$DOCKER_CONFIG" docker compose version >/dev/null 2>&1; then
+            COMPOSE_SRC=\$(find /home /mnt/stateful_partition/home -name 'docker-compose' -path '*/cli-plugins/*' 2>/dev/null | head -1)
+            if [ -n "\$COMPOSE_SRC" ]; then
+              cp "\$COMPOSE_SRC" "\$DOCKER_CONFIG/cli-plugins/docker-compose"
+              echo "Installed docker compose from \$COMPOSE_SRC"
+            else
+              echo "Downloading docker compose v2.29.1..."
+              curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-linux-x86_64" \
+                -o "\$DOCKER_CONFIG/cli-plugins/docker-compose"
+            fi
+            chmod +x "\$DOCKER_CONFIG/cli-plugins/docker-compose"
+          fi
+          echo "Docker Compose: \$(DOCKER_CONFIG="\$DOCKER_CONFIG" docker compose version)"
+        fi
+
+        # GHCR authentication
+        if [ "${GHCR_ENABLED}" = "true" ] && [ -n "${GHCR_TOKEN}" ]; then
+          echo '${GHCR_TOKEN}' | docker login ghcr.io \
+            -u '${GHCR_ACTOR}' --password-stdin
+          echo "Logged in to GHCR"
+        fi
+
+        # Update IMAGE_TAG in .env
+        if [ -f "${INSTALL_DIR}/.env" ]; then
+          sed -i 's|^IMAGE_TAG=.*|IMAGE_TAG=${IMAGE_TAG}|' ${INSTALL_DIR}/.env
         else
-          # Fallback: Laravel / PHP app deploy
+          echo 'IMAGE_TAG=${IMAGE_TAG}' >> ${INSTALL_DIR}/.env
+        fi
+        echo "IMAGE_TAG=${IMAGE_TAG}"
+
+        # Build the docker compose command prefix
+        DC_ENV=""
+        [ -n "\${DOCKER_CONFIG:-}" ] && DC_ENV="DOCKER_CONFIG=\$DOCKER_CONFIG"
+        DC="\$DC_ENV docker compose -f ${INSTALL_DIR}/${COMPOSE_FILE} --env-file ${INSTALL_DIR}/.env"
+
+        # Pull new images
+        echo '=== Pulling images ==='
+        eval "\$DC pull"
+
+        # Bring up all services
+        echo '=== Starting services ==='
+        eval "\$DC up -d --remove-orphans" || {
+          echo '=== DEPLOY FAILED — capturing container logs ==='
+          eval "\$DC logs --tail=50" 2>&1 || true
+          exit 1
+        }
+
+        # Run post-start script if configured
+        if [ -n "${POST_START_SCRIPT}" ] && [ -f "${INSTALL_DIR}/${POST_START_SCRIPT}" ]; then
+          echo "=== Running post-start script: ${POST_START_SCRIPT} ==="
+          cd ${INSTALL_DIR} && bash "${POST_START_SCRIPT}"
+        fi
+
+        # Prune old images
+        echo '=== Pruning unused images ==='
+        docker image prune -a -f --filter 'until=1h' 2>/dev/null || true
+        echo "Disk after prune: \$(df -h /mnt/stateful_partition 2>/dev/null | tail -1 | awk '{print \$4 " free"}' || echo 'N/A')"
+
+        echo '=== Deploy complete ==='
+        REMOTE_SCRIPT
+        else
+          # --- Fallback: Laravel / PHP app deploy ---
           echo "Running standard deploy (Laravel/PHP)..."
           gcloud compute ssh "$VM_NAME" \
             --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
             --command="sudo bash -s" << 'REMOTE_SCRIPT'
-          set -euo pipefail
-          cd ${INSTALL_DIR}
-          composer install --no-dev --optimize-autoloader 2>/dev/null || true
-          php artisan config:clear 2>/dev/null || true
-          php artisan cache:clear 2>/dev/null || true
-          php artisan migrate --force 2>/dev/null || true
-          php artisan queue:restart 2>/dev/null || true
-          sudo systemctl reload apache2 2>/dev/null || sudo systemctl reload nginx 2>/dev/null || true
-          echo "Deploy complete"
-          REMOTE_SCRIPT
+        set -euo pipefail
+        cd ${INSTALL_DIR}
+        composer install --no-dev --optimize-autoloader 2>/dev/null || true
+        php artisan config:clear 2>/dev/null || true
+        php artisan cache:clear 2>/dev/null || true
+        php artisan migrate --force 2>/dev/null || true
+        php artisan queue:restart 2>/dev/null || true
+        sudo systemctl reload apache2 2>/dev/null || sudo systemctl reload nginx 2>/dev/null || true
+        echo "Deploy complete"
+        REMOTE_SCRIPT
         fi
 
     # ── Health check ────────────────────────────────────────────────────
