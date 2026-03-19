@@ -1,0 +1,193 @@
+# Reusable CI/CD pipeline for mobile projects.
+# Called by each project's .github/workflows/gigafactory.yaml dispatcher.
+#
+# Full pipeline: setup → build → test → distribute
+name: Mobile Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      project_config:
+        description: "Path to .gigafactory/project.yaml"
+        required: true
+        type: string
+      platform:
+        description: "Target platform (ios, android, both)"
+        required: true
+        type: string
+      build_type:
+        description: "Build type (development, preview, production)"
+        required: false
+        type: string
+        default: "development"
+      test_tags:
+        description: "Maestro tags to filter tests (optional)"
+        required: false
+        type: string
+        default: ""
+      distribute:
+        description: "Whether to distribute after build and test"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      APPLE_API_KEY_ID:
+        description: "App Store Connect API key ID"
+        required: false
+      APPLE_API_ISSUER_ID:
+        description: "App Store Connect API issuer ID"
+        required: false
+      APPLE_API_KEY_CONTENT:
+        description: "App Store Connect API key content (p8)"
+        required: false
+      PLAY_STORE_JSON_KEY:
+        description: "Google Play service account JSON key"
+        required: false
+      MATCH_PASSWORD:
+        description: "Fastlane match encryption password"
+        required: false
+      APP_ID:
+        description: "GitHub App ID for private module access"
+        required: false
+      APP_PRIVATE_KEY:
+        description: "GitHub App private key"
+        required: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  # ── Parse project manifest ─────────────────────────────────────────────────
+  parse-config:
+    runs-on: ubuntu-latest
+    outputs:
+      app_path: ${{ steps.parse.outputs.app_path }}
+      test_flows_path: ${{ steps.parse.outputs.test_flows_path }}
+      distribution_track: ${{ steps.parse.outputs.distribution_track }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: parse
+        shell: bash
+        run: |
+          CONFIG="${{ inputs.project_config }}"
+          if [ ! -f "$CONFIG" ]; then
+            echo "::error::Project config not found at $CONFIG"
+            exit 1
+          fi
+          APP_PATH=$(grep 'app_path:' "$CONFIG" | head -1 | awk '{print $2}')
+          echo "app_path=${APP_PATH:-.}" >> "$GITHUB_OUTPUT"
+          TEST_FLOWS=$(grep 'test_flows_path:' "$CONFIG" | head -1 | awk '{print $2}')
+          echo "test_flows_path=${TEST_FLOWS:-maestro}" >> "$GITHUB_OUTPUT"
+          TRACK=$(grep 'distribution_track:' "$CONFIG" | head -1 | awk '{print $2}')
+          echo "distribution_track=${TRACK:-internal}" >> "$GITHUB_OUTPUT"
+
+  # ── Setup and Build ────────────────────────────────────────────────────────
+  build:
+    needs: parse-config
+    runs-on: ${{ inputs.platform == 'android' && 'ubuntu-latest' || 'macos-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gigafacty/gigafactory-actions/setup-stack@main
+        with:
+          language: react-native
+      - uses: gigafacty/gigafactory-actions/build-mobile@main
+        with:
+          platform: ${{ inputs.platform }}
+          app_path: ${{ needs.parse-config.outputs.app_path }}
+          build_type: ${{ inputs.build_type }}
+
+  # ── Test iOS ───────────────────────────────────────────────────────────────
+  test-ios:
+    needs: [parse-config, build]
+    if: inputs.platform == 'ios' || inputs.platform == 'both'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gigafacty/gigafactory-actions/setup-stack@main
+        with:
+          language: react-native
+      - uses: gigafacty/gigafactory-actions/test-mobile@main
+        with:
+          app_path: ${{ needs.parse-config.outputs.app_path }}
+          platform: ios
+          test_flows_path: ${{ needs.parse-config.outputs.test_flows_path }}
+          tags: ${{ inputs.test_tags }}
+
+  # ── Test Android ───────────────────────────────────────────────────────────
+  test-android:
+    needs: [parse-config, build]
+    if: inputs.platform == 'android' || inputs.platform == 'both'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gigafacty/gigafactory-actions/setup-stack@main
+        with:
+          language: react-native
+      - uses: gigafacty/gigafactory-actions/test-mobile@main
+        with:
+          app_path: ${{ needs.parse-config.outputs.app_path }}
+          platform: android
+          test_flows_path: ${{ needs.parse-config.outputs.test_flows_path }}
+          tags: ${{ inputs.test_tags }}
+
+  # ── Distribute iOS ────────────────────────────────────────────────────────
+  distribute-ios:
+    needs: [parse-config, build, test-ios]
+    if: |
+      always() &&
+      inputs.distribute &&
+      (inputs.platform == 'ios' || inputs.platform == 'both') &&
+      !contains(needs.*.result, 'failure')
+    runs-on: macos-latest
+    environment: production
+    env:
+      APP_STORE_CONNECT_API_KEY_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APP_STORE_CONNECT_API_KEY_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+      APP_STORE_CONNECT_API_KEY_KEY: ${{ secrets.APPLE_API_KEY_CONTENT }}
+      MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gigafacty/gigafactory-actions/setup-stack@main
+        with:
+          language: react-native
+      - uses: gigafacty/gigafactory-actions/build-mobile@main
+        with:
+          platform: ios
+          app_path: ${{ needs.parse-config.outputs.app_path }}
+          build_type: production
+      - uses: gigafacty/gigafactory-actions/distribute-mobile@main
+        with:
+          platform: ios
+          app_path: ${{ needs.parse-config.outputs.app_path }}
+          track: ${{ needs.parse-config.outputs.distribution_track }}
+          build_type: production
+
+  # ── Distribute Android ────────────────────────────────────────────────────
+  distribute-android:
+    needs: [parse-config, build, test-android]
+    if: |
+      always() &&
+      inputs.distribute &&
+      (inputs.platform == 'android' || inputs.platform == 'both') &&
+      !contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      SUPPLY_JSON_KEY_DATA: ${{ secrets.PLAY_STORE_JSON_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gigafacty/gigafactory-actions/setup-stack@main
+        with:
+          language: react-native
+      - uses: gigafacty/gigafactory-actions/build-mobile@main
+        with:
+          platform: android
+          app_path: ${{ needs.parse-config.outputs.app_path }}
+          build_type: production
+      - uses: gigafacty/gigafactory-actions/distribute-mobile@main
+        with:
+          platform: android
+          app_path: ${{ needs.parse-config.outputs.app_path }}
+          track: ${{ needs.parse-config.outputs.distribution_track }}
+          build_type: production

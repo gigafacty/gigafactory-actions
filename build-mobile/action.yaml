@@ -1,0 +1,84 @@
+name: "Build Mobile"
+description: "Build iOS and Android apps using Expo prebuild and Fastlane"
+
+inputs:
+  platform:
+    description: "Target platform (ios, android, both)"
+    required: true
+  app_path:
+    description: "Path to the Expo app directory"
+    required: true
+  build_type:
+    description: "Build type (development, preview, production)"
+    required: true
+    default: "development"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Ruby and Fastlane
+      shell: bash
+      run: |
+        cd "${{ inputs.app_path }}"
+        if [ -f "Gemfile" ]; then
+          bundle install --jobs 4 --retry 3
+        else
+          gem install fastlane --no-document
+        fi
+
+    - name: Cache CocoaPods
+      if: inputs.platform == 'ios' || inputs.platform == 'both'
+      uses: actions/cache@v4
+      with:
+        path: ${{ inputs.app_path }}/ios/Pods
+        key: pods-${{ hashFiles(format('{0}/ios/Podfile.lock', inputs.app_path)) }}
+        restore-keys: |
+          pods-
+
+    - name: Cache Gradle
+      if: inputs.platform == 'android' || inputs.platform == 'both'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+          ${{ inputs.app_path }}/android/.gradle
+        key: gradle-${{ hashFiles(format('{0}/android/gradle/wrapper/gradle-wrapper.properties', inputs.app_path)) }}
+        restore-keys: |
+          gradle-
+
+    - name: Expo prebuild
+      shell: bash
+      run: |
+        cd "${{ inputs.app_path }}"
+        npx expo prebuild --clean
+
+    - name: Build iOS
+      if: inputs.platform == 'ios' || inputs.platform == 'both'
+      shell: bash
+      run: |
+        cd "${{ inputs.app_path }}"
+        cd ios && pod install --repo-update && cd ..
+        # Map build_type to Fastlane lane name convention: build_dev, build_preview, build_prod
+        LANE="build_${{ inputs.build_type }}"
+        if [ "${{ inputs.build_type }}" = "production" ]; then LANE="build_prod"; fi
+        bundle exec fastlane ios "$LANE"
+
+    - name: Build Android
+      if: inputs.platform == 'android' || inputs.platform == 'both'
+      shell: bash
+      run: |
+        cd "${{ inputs.app_path }}"
+        LANE="build_${{ inputs.build_type }}"
+        if [ "${{ inputs.build_type }}" = "production" ]; then LANE="build_prod"; fi
+        bundle exec fastlane android "$LANE"
+
+    - name: Upload build artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: mobile-build-${{ inputs.platform }}
+        path: |
+          ${{ inputs.app_path }}/build/
+          ${{ inputs.app_path }}/android/app/build/outputs/
+        retention-days: 7
