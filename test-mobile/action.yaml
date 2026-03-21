@@ -1,0 +1,77 @@
+name: "Test Mobile"
+description: "Run Maestro E2E test flows on iOS simulator or Android emulator"
+
+inputs:
+  app_path:
+    description: "Path to the Expo app directory"
+    required: true
+  platform:
+    description: "Target platform (ios, android)"
+    required: true
+  test_flows_path:
+    description: "Path to Maestro test flow directory"
+    required: true
+  tags:
+    description: "Maestro tags to filter tests (optional)"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Maestro CLI
+      shell: bash
+      run: |
+        if ! command -v maestro &>/dev/null; then
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+        fi
+
+    - name: Boot iOS simulator
+      if: inputs.platform == 'ios'
+      shell: bash
+      run: |
+        # Try iPhone 16, fall back to latest available iPhone
+        DEVICE=$(xcrun simctl list devices available -j | \
+          jq -r '[.devices[][] | select(.name | test("iPhone 16$"))] | first // empty')
+        if [ -z "$DEVICE" ]; then
+          DEVICE=$(xcrun simctl list devices available -j | \
+            jq -r '[.devices[][] | select(.name | test("iPhone"))] | last')
+        fi
+        UDID=$(echo "$DEVICE" | jq -r '.udid')
+        echo "Booting simulator: $(echo "$DEVICE" | jq -r '.name') ($UDID)"
+        xcrun simctl boot "$UDID" 2>/dev/null || true
+        # Wait for simulator to be ready
+        xcrun simctl bootstatus "$UDID" -b
+
+    - name: Start Android emulator
+      if: inputs.platform == 'android'
+      shell: bash
+      run: |
+        echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+          "platform-tools" "emulator" "system-images;android-34;google_apis;x86_64"
+        echo "no" | $ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd \
+          -n test_device -k "system-images;android-34;google_apis;x86_64" --force
+        $ANDROID_HOME/emulator/emulator -avd test_device -no-window -no-audio -no-snapshot -gpu swiftshader_indirect &
+        adb wait-for-device shell 'while [[ -z $(getprop sys.boot_completed) ]]; do sleep 1; done'
+
+    - name: Run Maestro tests
+      shell: bash
+      run: |
+        TAGS_FLAG=""
+        if [ -n "${{ inputs.tags }}" ]; then
+          TAGS_FLAG="--tags ${{ inputs.tags }}"
+        fi
+        maestro test \
+          "${{ inputs.test_flows_path }}" \
+          $TAGS_FLAG \
+          --format junit \
+          --output maestro-results.xml
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: maestro-results-${{ inputs.platform }}
+        path: maestro-results.xml
+        retention-days: 14

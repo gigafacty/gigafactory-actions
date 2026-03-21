@@ -1,0 +1,49 @@
+name: "Distribute Mobile"
+description: "Upload iOS builds to TestFlight and Android builds to Play Store via Fastlane"
+
+inputs:
+  platform:
+    description: "Target platform (ios, android)"
+    required: true
+  app_path:
+    description: "Path to the Expo app directory"
+    required: true
+  track:
+    description: "Distribution track (internal, beta, production)"
+    required: true
+    default: "internal"
+  build_type:
+    description: "Build type (development, preview, production)"
+    required: true
+    default: "production"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Upload to TestFlight
+      if: inputs.platform == 'ios'
+      shell: bash
+      run: |
+        cd "${{ inputs.app_path }}"
+        if [ "${{ inputs.track }}" = "production" ]; then
+          bundle exec fastlane ios release
+        else
+          bundle exec fastlane pilot upload \
+            --distribute_external false \
+            --skip_waiting_for_build_processing true
+        fi
+
+    - name: Upload to Play Store
+      if: inputs.platform == 'android'
+      shell: bash
+      run: |
+        cd "${{ inputs.app_path }}"
+        if [ "${{ inputs.track }}" = "production" ]; then
+          bundle exec fastlane supply \
+            --track production \
+            --release_status completed
+        else
+          bundle exec fastlane supply \
+            --track "${{ inputs.track }}" \
+            --release_status draft
+        fi

@@ -3,7 +3,7 @@ description: "Set up language runtime and dependencies based on project manifest
 
 inputs:
   language:
-    description: "Programming language (go, typescript, javascript, python)"
+    description: "Programming language (go, typescript, javascript, python, react-native)"
     required: true
   runtime:
     description: "Runtime version (e.g., go-1.24, node-22, python-3.12)"
@@ -19,10 +19,24 @@ runs:
         go-version: "1.24"
 
     - name: Setup Node
-      if: contains(fromJSON('["typescript","javascript"]'), inputs.language)
+      if: contains(fromJSON('["typescript","javascript","react-native"]'), inputs.language)
       uses: actions/setup-node@v4
       with:
         node-version: "22"
+
+    - name: Setup Java (Android builds)
+      if: inputs.language == 'react-native'
+      uses: actions/setup-java@v4
+      with:
+        distribution: "zulu"
+        java-version: "17"
+
+    - name: Setup Ruby (Fastlane)
+      if: inputs.language == 'react-native'
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: "3.3"
+        bundler-cache: true
 
     - name: Setup Python
       if: inputs.language == 'python'
@@ -34,6 +48,7 @@ runs:
       shell: bash
       run: |
         if [ -f "go.mod" ]; then go mod download; fi
+        if [ -f "pnpm-lock.yaml" ]; then npm install -g pnpm && pnpm install --frozen-lockfile; fi
         if [ -f "package-lock.json" ]; then npm ci; fi
-        if [ -f "package.json" ] && [ ! -f "package-lock.json" ]; then npm install; fi
+        if [ -f "package.json" ] && [ ! -f "package-lock.json" ] && [ ! -f "pnpm-lock.yaml" ]; then npm install; fi
         if [ -f "pyproject.toml" ]; then pip install -e ".[dev]" 2>/dev/null || pip install -e . 2>/dev/null || true; fi
