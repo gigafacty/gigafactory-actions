@@ -155,7 +155,9 @@ runs:
             sudo mkdir -p ${DIRS}
             sudo chown \$(id -un):\$(id -gn) ${INSTALL_DIR}
             for d in docker scripts .env; do
-              [ -e ${INSTALL_DIR}/\$d ] && sudo chown -R \$(id -un):\$(id -gn) ${INSTALL_DIR}/\$d
+              if [ -e ${INSTALL_DIR}/\$d ]; then
+                sudo chown -R \$(id -un):\$(id -gn) ${INSTALL_DIR}/\$d
+              fi
             done
           "
 
