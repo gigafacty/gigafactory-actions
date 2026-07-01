@@ -149,7 +149,7 @@ runs:
           DIRS="${DIRS} ${INSTALL_DIR}/$(dirname ${SSL_CERT_DEST})"
         fi
 
-        gcloud compute ssh "$VM_NAME" \
+        bash "$GITHUB_ACTION_PATH/gcloud-ssh-retry.sh" gcloud compute ssh "$VM_NAME" \
           --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
           --command="
             sudo mkdir -p ${DIRS}
@@ -181,18 +181,18 @@ runs:
         chmod 600 /tmp/certs/key.pem
 
         # SCP individual files to VM
-        gcloud compute scp \
+        bash "$GITHUB_ACTION_PATH/gcloud-ssh-retry.sh" gcloud compute scp \
           /tmp/certs/cert.pem \
           "$VM_NAME:${INSTALL_DIR}/${SSL_CERT_DEST}" \
           --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap
 
-        gcloud compute scp \
+        bash "$GITHUB_ACTION_PATH/gcloud-ssh-retry.sh" gcloud compute scp \
           /tmp/certs/key.pem \
           "$VM_NAME:${INSTALL_DIR}/${SSL_KEY_DEST}" \
           --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap
 
         # Fix ownership — certs should be readable by Caddy (runs as root in container)
-        gcloud compute ssh "$VM_NAME" \
+        bash "$GITHUB_ACTION_PATH/gcloud-ssh-retry.sh" gcloud compute ssh "$VM_NAME" \
           --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
           --command="
             sudo chown root:root ${INSTALL_DIR}/${SSL_CERT_DEST} ${INSTALL_DIR}/${SSL_KEY_DEST}
@@ -219,7 +219,7 @@ runs:
             dir=$(echo "$dir" | xargs)  # trim whitespace
             if [ -d "$dir" ] || [ -f "$dir" ]; then
               echo "Syncing $dir → $INSTALL_DIR/$dir"
-              gcloud compute scp --recurse \
+              bash "$GITHUB_ACTION_PATH/gcloud-ssh-retry.sh" gcloud compute scp --recurse \
                 "$dir" "$VM_NAME:${INSTALL_DIR}/" \
                 --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
                 --compress
@@ -229,7 +229,7 @@ runs:
           done
         else
           # Default: sync entire project (excluding heavy dirs)
-          gcloud compute scp --recurse \
+          bash "$GITHUB_ACTION_PATH/gcloud-ssh-retry.sh" gcloud compute scp --recurse \
             . "$VM_NAME:${INSTALL_DIR}/" \
             --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
             --compress
@@ -253,7 +253,7 @@ runs:
         # --- Custom deploy command ---
         if [ -n "$DEPLOY_COMMAND" ]; then
           echo "Running custom deploy command..."
-          gcloud compute ssh "$VM_NAME" \
+          bash "$GITHUB_ACTION_PATH/gcloud-ssh-retry.sh" gcloud compute ssh "$VM_NAME" \
             --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
             --command="cd ${INSTALL_DIR} && sudo bash -c 'export IMAGE_TAG=${IMAGE_TAG} && ${DEPLOY_COMMAND}'"
           exit 0
@@ -277,7 +277,7 @@ runs:
           GHCR_TOKEN="${{ env.GHCR_TOKEN }}"
           GHCR_ACTOR="${{ env.GHCR_ACTOR }}"
 
-          gcloud compute ssh "$VM_NAME" \
+          bash "$GITHUB_ACTION_PATH/gcloud-ssh-retry.sh" gcloud compute ssh "$VM_NAME" \
             --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
             --command="sudo bash -s" << REMOTE_SCRIPT
         set -euo pipefail
@@ -352,7 +352,7 @@ runs:
         else
           # --- Fallback: Laravel / PHP app deploy ---
           echo "Running standard deploy (Laravel/PHP)..."
-          gcloud compute ssh "$VM_NAME" \
+          bash "$GITHUB_ACTION_PATH/gcloud-ssh-retry.sh" gcloud compute ssh "$VM_NAME" \
             --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
             --command="sudo bash -s" << 'REMOTE_SCRIPT'
         set -euo pipefail
