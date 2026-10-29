@@ -104,6 +104,21 @@ runs:
     - name: Set up gcloud
       uses: google-github-actions/setup-gcloud@v2
 
+    # ── Run gcloud on the runner's system Python ────────────────────────
+    # gcloud's bundled Python (3.14 in SDK 568) stalls IAP-tunnelled uploads
+    # from GitHub-hosted runners: the stdin of an ssh session leaves in bursts
+    # minutes apart, so even a 50 KB file sync never finishes. The runner's
+    # system Python sends the same stream in seconds. NumPy does not help.
+    - name: Use the system Python for gcloud
+      shell: bash
+      run: |
+        if command -v python3 >/dev/null 2>&1 && python3 -m venv "$RUNNER_TEMP/gcloud-python"; then
+          echo "CLOUDSDK_PYTHON=$RUNNER_TEMP/gcloud-python/bin/python" >> "$GITHUB_ENV"
+          echo "gcloud runs on $("$RUNNER_TEMP/gcloud-python/bin/python" -V)"
+        else
+          echo "::warning::No usable python3 on the runner; gcloud keeps its bundled Python, whose IAP uploads can stall"
+        fi
+
     # ── Ensure VM is running ────────────────────────────────────────────
     - name: Ensure VM is running
       shell: bash
