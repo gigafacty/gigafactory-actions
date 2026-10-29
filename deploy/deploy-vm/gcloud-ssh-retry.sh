@@ -30,16 +30,43 @@
 #
 # Heredoc/stdin-fed commands are supported: stdin is slurped once up front and
 # replayed from a temp file on every attempt (a raw heredoc fd is at EOF after
-# the first read, which would send an empty script on retry).
+# the first read, which would send an empty script on retry). The same applies
+# to a piped tar stream.
+#
+# Stalls
+# ------
+# An IAP-tunnelled transfer can also stall: no bytes move for minutes and
+# nothing is printed, so there is no output for TRANSIENT_RE to match and the
+# attempt never ends on its own — it runs until the job's step timeout. Set
+# GCLOUD_SSH_ATTEMPT_TIMEOUT on calls that are safe to kill and re-run (file
+# syncs, mkdir/chown) to bound each attempt; an attempt that hits the limit is
+# retried like a handshake race. Leave it unset for long or non-idempotent
+# remote commands (compose pull/up): killing those mid-way is not a retry.
 #
 # Tunables (env):
-#   GCLOUD_SSH_RETRIES  max attempts        (default 5)
-#   GCLOUD_SSH_BACKOFF  base backoff seconds (default 5; linear: base*attempt)
+#   GCLOUD_SSH_RETRIES          max attempts         (default 5)
+#   GCLOUD_SSH_BACKOFF          base backoff seconds (default 5; linear: base*attempt)
+#   GCLOUD_SSH_ATTEMPT_TIMEOUT  seconds per attempt  (default 0 = no limit)
 # ==============================================================================
 set -uo pipefail
 
 MAX_ATTEMPTS="${GCLOUD_SSH_RETRIES:-5}"
 BASE_BACKOFF="${GCLOUD_SSH_BACKOFF:-5}"
+ATTEMPT_TIMEOUT="${GCLOUD_SSH_ATTEMPT_TIMEOUT:-0}"
+
+# GNU timeout runs the command in its own process group and signals the whole
+# group, so gcloud's ssh/scp child and its IAP tunnel helper die with it. It
+# exits 124 when the limit hit, or 137 when the command ignored TERM and had to
+# be KILLed after the grace period.
+RUN=("$@")
+if [ "$ATTEMPT_TIMEOUT" -gt 0 ]; then
+  if command -v timeout >/dev/null 2>&1; then
+    RUN=(timeout --kill-after=10 "$ATTEMPT_TIMEOUT" "$@")
+  else
+    echo "::warning::GCLOUD_SSH_ATTEMPT_TIMEOUT=${ATTEMPT_TIMEOUT} ignored: timeout(1) is not installed"
+    ATTEMPT_TIMEOUT=0
+  fi
+fi
 
 # Transient SSH-*handshake* signatures worth retrying. Case-insensitive. These
 # are all pre-auth / connection-establishment failures the remote command never
@@ -66,21 +93,29 @@ attempt=1
 while :; do
   # Stream combined output live (tee) while capturing it for transient
   # detection. PIPESTATUS[0] is the command's exit code, not tee's.
-  "$@" < "$STDIN_FILE" 2>&1 | tee "$LOG_FILE"
+  "${RUN[@]}" < "$STDIN_FILE" 2>&1 | tee "$LOG_FILE"
   rc="${PIPESTATUS[0]}"
 
   if [ "$rc" -eq 0 ]; then
     exit 0
   fi
 
-  if [ "$attempt" -ge "$MAX_ATTEMPTS" ] || ! grep -qiE "$TRANSIENT_RE" "$LOG_FILE"; then
-    # Out of attempts, or the failure is not a transient handshake race —
-    # fail fast with the real exit code.
+  if [ "$ATTEMPT_TIMEOUT" -gt 0 ] && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; }; then
+    reason="stalled past ${ATTEMPT_TIMEOUT}s"
+  elif grep -qiE "$TRANSIENT_RE" "$LOG_FILE"; then
+    reason="OS-Login handshake race"
+  else
+    # Not transient — fail fast with the real exit code.
+    exit "$rc"
+  fi
+
+  if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+    echo "::error::gcloud ssh/scp ${reason} on all ${MAX_ATTEMPTS} attempts (rc=${rc})"
     exit "$rc"
   fi
 
   wait_s=$(( BASE_BACKOFF * attempt ))
-  echo "::warning::gcloud ssh/scp transient failure (attempt ${attempt}/${MAX_ATTEMPTS}, rc=${rc}) — OS-Login handshake race, retrying in ${wait_s}s"
+  echo "::warning::gcloud ssh/scp transient failure (attempt ${attempt}/${MAX_ATTEMPTS}, rc=${rc}) — ${reason}, retrying in ${wait_s}s"
   sleep "$wait_s"
   attempt=$(( attempt + 1 ))
 done
