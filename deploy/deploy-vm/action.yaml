@@ -136,6 +136,8 @@ runs:
     # ── Fix directory permissions ───────────────────────────────────────
     - name: Fix VM directory permissions
       shell: bash
+      env:
+        GCLOUD_SSH_ATTEMPT_TIMEOUT: "90"
       run: |
         GCP_PROJECT="${{ steps.vm.outputs.gcp_project }}"
         ZONE="${{ steps.vm.outputs.zone }}"
@@ -165,6 +167,8 @@ runs:
     - name: Deploy SSL certificates
       if: steps.vm.outputs.ssl_cert_secret != ''
       shell: bash
+      env:
+        GCLOUD_SSH_ATTEMPT_TIMEOUT: "90"
       run: |
         GCP_PROJECT="${{ steps.vm.outputs.gcp_project }}"
         ZONE="${{ steps.vm.outputs.zone }}"
@@ -203,8 +207,17 @@ runs:
         rm -rf /tmp/certs
 
     # ── Sync project files to VM ──────────────────────────────────────────
+    # One tar stream over one ssh session, not `scp --recurse`. scp (SFTP since
+    # OpenSSH 9) makes a round trip per file, and over IAP a transfer can stall
+    # for minutes between files with nothing printed. The retry script replays
+    # the buffered stream, and re-extracting over a partial copy is safe, so a
+    # stalled attempt is killed at GCLOUD_SSH_ATTEMPT_TIMEOUT and re-run. A
+    # healthy sync takes ~20s; the limit has to leave the deploy's step budget
+    # room for the image pull after it.
     - name: Sync files to VM
       shell: bash
+      env:
+        GCLOUD_SSH_ATTEMPT_TIMEOUT: "90"
       run: |
         GCP_PROJECT="${{ steps.vm.outputs.gcp_project }}"
         ZONE="${{ steps.vm.outputs.zone }}"
@@ -212,28 +225,34 @@ runs:
         INSTALL_DIR="${{ steps.vm.outputs.install_dir }}"
         SYNC_DIRS="${{ steps.vm.outputs.sync_dirs }}"
 
+        PATHS=()
         if [ -n "$SYNC_DIRS" ]; then
           # Sync only specified directories (comma-separated)
           IFS=',' read -ra DIRS <<< "$SYNC_DIRS"
           for dir in "${DIRS[@]}"; do
             dir=$(echo "$dir" | xargs)  # trim whitespace
             if [ -d "$dir" ] || [ -f "$dir" ]; then
-              echo "Syncing $dir → $INSTALL_DIR/$dir"
-              bash "$GITHUB_ACTION_PATH/gcloud-ssh-retry.sh" gcloud compute scp --recurse \
-                "$dir" "$VM_NAME:${INSTALL_DIR}/" \
-                --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
-                --compress
+              PATHS+=("$dir")
             else
               echo "::warning::Sync target '$dir' not found, skipping"
             fi
           done
         else
-          # Default: sync entire project (excluding heavy dirs)
-          bash "$GITHUB_ACTION_PATH/gcloud-ssh-retry.sh" gcloud compute scp --recurse \
-            . "$VM_NAME:${INSTALL_DIR}/" \
-            --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
-            --compress
+          # Default: sync entire project
+          PATHS=(.)
         fi
+
+        if [ "${#PATHS[@]}" -eq 0 ]; then
+          echo "::warning::Nothing to sync"
+          exit 0
+        fi
+
+        echo "Syncing ${PATHS[*]} → $INSTALL_DIR/"
+        # -h follows symlinks, as scp --recurse did.
+        tar -czhf - "${PATHS[@]}" \
+          | bash "$GITHUB_ACTION_PATH/gcloud-ssh-retry.sh" gcloud compute ssh "$VM_NAME" \
+              --zone="$ZONE" --project="$GCP_PROJECT" --tunnel-through-iap \
+              --command="tar -xzf - -C ${INSTALL_DIR}"
 
     # ── Deploy ─────────────────────────────────────────────────────────────
     - name: Deploy
