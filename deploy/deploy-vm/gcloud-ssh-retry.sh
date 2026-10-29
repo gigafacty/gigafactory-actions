@@ -110,7 +110,7 @@ while :; do
   fi
 
   if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
-    echo "::error::gcloud ssh/scp ${reason} on all ${MAX_ATTEMPTS} attempts (rc=${rc})"
+    echo "::error::gcloud ssh/scp failed on all ${MAX_ATTEMPTS} attempts (last: ${reason}, rc=${rc})"
     exit "$rc"
   fi
 
