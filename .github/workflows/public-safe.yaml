@@ -1,0 +1,36 @@
+# This repo is public: fail any push or pull request that adds a key, a token
+# or an identifier of a private system. See scripts/check-public-safe.sh.
+name: Public safe
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
+          echo "${GITLEAKS_SHA256}  $f" | sha256sum -c -
+          tar -xzf "$f" gitleaks && sudo mv gitleaks /usr/local/bin/
+
+      - name: Test the check
+        run: bash scripts/test-check-public-safe.sh
+
+      - name: Check this repo, history included
+        run: bash scripts/check-public-safe.sh
