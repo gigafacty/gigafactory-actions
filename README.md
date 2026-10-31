@@ -1,6 +1,6 @@
 # Gigafactory Actions
 
-Reusable GitHub Actions for projects managed by [Gigafactory](https://giga.endira.ai).
+Reusable GitHub Actions for projects managed by Gigafactory.
 
 ## Actions
 
@@ -23,6 +23,13 @@ Referenced by the [managed project pipeline](https://github.com/gigafacty/gigafa
   with:
     project_config: .gigafactory/project.yaml
 ```
+
+## This repo is public
+
+It holds only generic code. Every credential and every coordinate of a private
+system (service accounts, Workload Identity providers, registry paths) comes
+from the caller as an input or a secret. `scripts/check-public-safe.sh` fails
+CI on a key, a token (gitleaks, the whole history) or such an identifier.
 
 ## License
 
